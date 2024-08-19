@@ -11,6 +11,11 @@ from ctypes.util import find_library
 so = glob.glob(os.path.join(os.path.dirname(__file__), 'jpeg_toolbox_extension.*.so'))
 SO_PATH = so[0]
 
+def add_user_comment(image_path, comment):
+    jpeg = CDLL(SO_PATH)
+    jpeg.add_user_comment.argtypes = [c_char_p, c_char_p]
+    jpeg.add_user_comment(image_path.encode('utf-8'), comment.encode('utf-8'))
+
 def load(path, use_blocks=False):
 
     if not os.path.isfile(path):
