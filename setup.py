@@ -3,7 +3,9 @@ from distutils.core import setup, Extension
 
 m = Extension('jpeg_toolbox_extension', 
               sources = ['jpeg_toolbox_extension.c'], 
-              libraries = ['jpeg'])
+              libraries = ['jpeg', 'exif'],  # Add 'exif' to the libraries list
+              library_dirs=['/usr/lib/x86_64-linux-gnu'],
+              include_dirs=['/usr/include', '/usr/local/include'])
 
 here = os.path.abspath(os.path.dirname(__file__))
 with open(os.path.join(here, 'README.md'), encoding='utf-8') as f:
