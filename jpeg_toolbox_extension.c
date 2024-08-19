@@ -1,4 +1,3 @@
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <jerror.h>
@@ -6,12 +5,13 @@
 #include <jpegint.h>
 #include <setjmp.h>
 #include <Python.h>
+#include <string.h>
+#include <iconv.h>
 
 #if defined(_MSC_VER)
 #include <BaseTsd.h>
 typedef SSIZE_T ssize_t;
 #endif
-
 
 #ifdef _WIN32
 #define LIBRARY_API __declspec(dllexport)
@@ -19,7 +19,206 @@ typedef SSIZE_T ssize_t;
 #define LIBRARY_API 
 #endif
 
+#define APP1_MARKER 0xFFE1
+#define EXIF_HEADER "Exif\0\0"
+#define TAG_USERCOMMENT 0x9286
 
+#pragma pack(push, 1)
+typedef struct {
+    unsigned short marker;
+    unsigned short length;
+} JpegSegment;
+
+typedef struct {
+    unsigned short tag;
+    unsigned short type;
+    unsigned int count;
+    unsigned int valueOffset;
+} TiffEntry;
+#pragma pack(pop)
+
+void write_uint16(unsigned char *buffer, unsigned short value, int isLittleEndian) {
+    if (isLittleEndian) {
+        buffer[0] = (value & 0xFF);
+        buffer[1] = (value >> 8);
+    } else {
+        buffer[0] = (value >> 8);
+        buffer[1] = (value & 0xFF);
+    }
+}
+
+void write_uint32(unsigned char *buffer, unsigned int value, int isLittleEndian) {
+    if (isLittleEndian) {
+        buffer[0] = (value & 0xFF);
+        buffer[1] = (value >> 8);
+        buffer[2] = (value >> 16);
+        buffer[3] = (value >> 24);
+    } else {
+        buffer[0] = (value >> 24);
+        buffer[1] = (value >> 16);
+        buffer[2] = (value >> 8);
+        buffer[3] = (value & 0xFF);
+    }
+}
+
+void add_user_comment(const char *image_path, const char *comment) {
+    FILE *file = fopen(image_path, "rb+");
+    if (!file) {
+        perror("Failed to open file");
+        return;
+    }
+
+    // Read the entire file into memory
+    fseek(file, 0, SEEK_END);
+    long fileSize = ftell(file);
+    fseek(file, 0, SEEK_SET);
+
+    unsigned char *buffer = (unsigned char *)malloc(fileSize);
+    if (buffer == NULL) {
+        perror("Failed to allocate memory");
+        fclose(file);
+        return;
+    }
+    fread(buffer, 1, fileSize, file);
+    fclose(file);
+
+    // Convert comment to UTF-16BE
+    iconv_t cd = iconv_open("UTF-16BE", "UTF-8");
+    if (cd == (iconv_t)-1) {
+        perror("iconv_open failed");
+        free(buffer);
+        return;
+    }
+
+    size_t inbytesleft = strlen(comment);
+    size_t outbytesleft = inbytesleft * 2 + 2; // UTF-16 can be up to twice as long, plus null terminator
+    char *utf16comment = malloc(outbytesleft);
+    char *inbuf = (char *)comment;
+    char *outbuf = utf16comment;
+
+    if (iconv(cd, &inbuf, &inbytesleft, &outbuf, &outbytesleft) == (size_t)-1) {
+        perror("iconv failed");
+        iconv_close(cd);
+        free(buffer);
+        free(utf16comment);
+        return;
+    }
+
+    iconv_close(cd);
+
+    size_t utf16len = outbuf - utf16comment;
+
+    // Calculate the new EXIF segment size
+    unsigned short commentLength = utf16len + 8; // 8 for "UNICODE\0" prefix
+    unsigned short app1Length = 2 + 6 + 2 + 2 + 4 + 2 + 12 + 4 + 2 + 12 + 4 + commentLength;
+    unsigned char *exifSegment = (unsigned char *)malloc(app1Length + 2);
+    if (exifSegment == NULL) {
+        perror("Failed to allocate memory");
+        free(buffer);
+        free(utf16comment);
+        return;
+    }
+
+    // Initialize EXIF segment
+    unsigned short byteOrder = 0x4D4D; // "MM" for big-endian
+    unsigned short tiffMagic = 0x002A;
+    unsigned int ifdOffset = 0x00000008;
+    unsigned short numEntries = 1;
+    unsigned int nextIfdOffset = 0x00000000;
+    char prefix[8] = "UNICODE\0";
+
+    // Write EXIF segment
+    unsigned char *p = exifSegment;
+    write_uint16(p, APP1_MARKER, 0); p += 2;
+    write_uint16(p, app1Length, 0); p += 2;
+    memcpy(p, EXIF_HEADER, 6); p += 6;
+    write_uint16(p, byteOrder, 0); p += 2;
+    write_uint16(p, tiffMagic, 0); p += 2;
+    write_uint32(p, ifdOffset, 0); p += 4;
+
+    // IFD0
+    write_uint16(p, numEntries, 0); p += 2;
+    write_uint16(p, 0x8769, 0); p += 2; // ExifOffset tag
+    write_uint16(p, 4, 0); p += 2; // LONG type
+    write_uint32(p, 1, 0); p += 4; // Count
+    write_uint32(p, p - exifSegment + 4 - 6, 0); p += 4; // Offset to ExifIFD
+    write_uint32(p, nextIfdOffset, 0); p += 4;
+
+    // ExifIFD
+    write_uint16(p, numEntries, 0); p += 2;
+    write_uint16(p, TAG_USERCOMMENT, 0); p += 2;
+    write_uint16(p, 7, 0); p += 2; // UNDEFINED type
+    write_uint32(p, commentLength, 0); p += 4;
+    write_uint32(p, p - exifSegment + 4 - 6, 0); p += 4; // Offset to the User Comment data
+    write_uint32(p, nextIfdOffset, 0); p += 4;
+
+    memcpy(p, prefix, 8); p += 8;
+    memcpy(p, utf16comment, utf16len);
+
+    // Open the file for writing
+    file = fopen(image_path, "wb");
+    if (!file) {
+        perror("Failed to open file for writing");
+        free(buffer);
+        free(exifSegment);
+        free(utf16comment);
+        return;
+    }
+
+    // Write JPEG SOI marker
+    fwrite(buffer, 1, 2, file);
+
+    // Write new EXIF segment
+    fwrite(exifSegment, 1, app1Length + 2, file);
+
+    // Find and write the rest of the original file, skipping any existing APP0 or APP1 segments
+    long i = 2;
+    while (i < fileSize - 1) {
+        if (buffer[i] == 0xFF && (buffer[i+1] == 0xE0 || buffer[i+1] == 0xE1)) {
+            // Skip existing APP0 (JFIF) or APP1 (EXIF) segment
+            unsigned short segmentLength = (buffer[i+2] << 8) | buffer[i+3];
+            i += 2 + segmentLength;
+        } else {
+            // Write this byte and move to the next
+            fputc(buffer[i], file);
+            i++;
+        }
+    }
+    
+    // Write the last byte if we haven't reached the end
+    if (i == fileSize - 1) {
+        fputc(buffer[i], file);
+    }
+
+    // Clean up
+    fclose(file);
+    free(buffer);
+    free(exifSegment);
+    free(utf16comment);
+}
+
+//Wrapper to call the add user comment c function.
+static PyObject* py_add_user_comment(PyObject *self, PyObject *args) {
+    const char *image_path;
+    const char *comment;
+
+    // Parse the Python arguments (expecting two strings)
+    if (!PyArg_ParseTuple(args, "ss", &image_path, &comment)) {
+        return NULL; // Return NULL to indicate error
+    }
+
+    // Call the original C function
+    add_user_comment(image_path, comment);
+
+    // Return None (equivalent to Python's return None)
+    Py_RETURN_NONE;
+}
+
+// Update method table if it exists, or define it if not
+static PyMethodDef JpegToolboxMethods[] = {
+    {"add_user_comment", py_add_user_comment, METH_VARARGS, "Add a user comment to a JPEG image"},
+    {NULL, NULL, 0, NULL} // Sentinel
+};
 
 // {{{ struct my_error_mgr
 struct my_error_mgr 
@@ -181,7 +380,6 @@ LIBRARY_API PyObject* read_file(const char *path)
          PyGILState_Release(gstate);
          return result;
    }
-
 
    // {{{ Header info 
    result = dict_add_int(result, "image_width", cinfo.image_width);
