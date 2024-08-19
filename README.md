@@ -7,7 +7,7 @@ NOTE: Currently, python-jpeg-toolbox only works on Linux.
 ## Install
 
 ```bash
-pip3 install git+https://github.com/daniellerch/python-jpeg-toolbox --user
+pip3 install git+https://github.com/aniellod/python-jpeg-toolbox --user
 ```
 
 ## Uninstall
