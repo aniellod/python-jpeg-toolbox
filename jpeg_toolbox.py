@@ -8,6 +8,8 @@ from ctypes import *
 import numpy as np
 from ctypes.util import find_library
 
+__version__ = "1.0"
+
 so = glob.glob(os.path.join(os.path.dirname(__file__), 'jpeg_toolbox_extension.*.so'))
 SO_PATH = so[0]
 
